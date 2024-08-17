@@ -1,0 +1,113 @@
+name: Build Cesium for Unreal Engine, targeting Windows and Android
+
+on:
+  workflow_dispatch:
+      
+jobs:
+  build-unreal-engine:
+    uses: ./.github/workflows/build-UnrealEngine-Win64-selfhosted.yml
+    secrets: inherit
+    with:
+      output-zip-file-name: 'UE_5_4_3'
+      relative-build-directory: 'u'
+      relative-output-directory: 'out'
+
+  install-unreal-engine-to-workflow-directory:
+    needs: build-unreal-engine
+    runs-on: [self-hosted, windows, x64]
+    timeout-minutes: 210
+    steps:
+      - name: Create the Output Directory if it Doesn't Exist
+        run: |
+          if (-not (Test-Path -Path '${{ github.workspace }}//UE')) {
+            mkdir '${{ github.workspace }}//UE'
+          }
+          
+      - name: Install Dependencies from Chocolatey
+        run: |
+          choco install -y 7zip
+          
+      - name: Unzip Unreal Engine
+        shell: cmd
+        run: |
+          set ArchiveFile=${{ github.workspace }}\out\UE_5_4_3.7z
+          set DestinationDirectory=${{ github.workspace }}\UE
+
+          7z x "%ArchiveFile%" -o"%DestinationDirectory%"
+
+      - name: Install Unreal Engine
+        run: |
+          Start-Process "${{ github.workspace}}\UE\Engine\Extras\Redist\en-us\UEPrereqSetup_x64.exe" -Args "-q" -Wait
+      
+  checkout-cesium-unreal:
+    runs-on: [self-hosted, windows, x64]
+    timeout-minutes: 45
+    steps:
+      - name: Create Cesium checkout directory
+        run: |
+          mkdir -p '${{ github.workspace }}\\c'
+        
+      - name: Checkout Cesium for Unreal
+        uses: actions/checkout@v4
+        with:
+          repository: 'CesiumGS/cesium-unreal'
+          ref: 'main'
+          submodules: recursive
+          path: '${{ github.workspace }}\\c'
+  
+  modify-cesium-unreal:
+    needs: checkout-cesium-unreal
+    uses: ./.github/workflows/modify-CesiumForUnrealEngine-selfhosted.yml
+    with:
+      cesium-unreal-relative-checkout-directory: 'c'
+
+  build-and-package-cesium-unreal-windows:
+    needs: [build-unreal-engine, modify-cesium-unreal]
+    uses: ./.github/workflows/build-and-package-CesiumForUnrealEngine-Win64-selfhosted.yml
+    with:
+      output-package-name: 'CesiumUnreal-2.7.1'
+      relative-build-directory: 'c'
+      relative-output-directory: 'out'
+      visual-studio-version: '2022'
+      visual-studio-components: 'Microsoft.VisualStudio.Component.VC.14.34.17.4.x86.x64,Microsoft.VisualStudio.Component.Windows10SDK.18362'
+      unreal-engine-version: '5.4.3'
+      unreal-batch-files-relative-directory: 'UE/Engine/Build/BatchFiles'
+      cmake-generator: 'Visual Studio 17 2022'
+      cmake-platform: 'x64,version=10.0.18362.0'
+      cmake-toolchain: 'v143' # According to Cesium, this should be version=14.34, however, even after installing dependencies "..VC.14.34..", this directory does not exist on my local machine. Remember, they're building on a Windows 2022 Server.
+                              # v143 means "use the VC.14.3... toolchain." Since we have only the correct variant installed, it should do the same thing.
+
+  build-and-package-cesium-unreal-android:
+    needs: [build-unreal-engine, modify-cesium-unreal]
+    uses: ./.github/workflows/build-and-package-CesiumForUnrealEngine-Android-selfhosted.yml
+    with:
+      output-package-name: 'CesiumUnreal-2.7.1'
+      relative-build-directory: 'c'
+      relative-output-directory: 'out'
+      unreal-engine-version: '5.4.3'
+      unreal-batch-files-relative-directory: 'UE/Engine/Build/BatchFiles'
+      android-ndk-version: 'r25b'
+  
+  export-cesium-unreal-combined:
+    runs-on: [self-hosted, windows, x64]
+    needs: [build-and-package-cesium-unreal-windows, build-and-package-cesium-unreal-android]
+    steps:
+      - name: Merge builds
+        run: |
+          # As long as you don't see error code 8, specifically, this job was probably successful.
+          robocopy "${{ github.workspace }}/out/cesium-windows" "${{ github.workspace }}/out/CesiumForUnreal" /E /XO /XC /XN /R:0 /W:0
+          robocopy "${{ github.workspace }}/out/cesium-android" "${{ github.workspace }}/out/CesiumForUnreal" /E /XO /XC /XN /R:0 /W:0
+
+          # # According to Cesium's docs, this also should be done.
+          # # I don't understand the reason that they give, but perhaps I will experiance the issue that they mention, at which point I will uncomment this and add additional notes.
+          # Remove-Item -Recurse -Force "${{ github.workspace }}/out/CesiumForUnreal/Binaries/**/*"
+          # Remove-Item -Recurse -Force "${{ github.workspace }}/out/CesiumForUnreal/Intermediate/**/*"
+
+          # # Optional: delete the cesium-windows and cesium-android directories since they have been utilized already to create the combined package.
+          # Remove-Item -Recurse -Force "${{ github.workspace }}/out/cesium-windows"
+          # Remove-Item -Recurse -Force "${{ github.workspace }}/out/cesium-android"
+
+          # Optional: delete the rest of the directories used during the build process (only the built package, and the zip folder containing UE will remain)
+          # Remove-Item -Recurse -Force "${{ github.workspace }}/u"
+          # Remove-Item -Recurse -Force "${{ github.workspace }}/UE"
+          # Remove-Item -Recurse -Force "${{ github.workspace }}/android-ndk-r25b"

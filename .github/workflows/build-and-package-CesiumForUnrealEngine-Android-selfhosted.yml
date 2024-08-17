@@ -1,0 +1,93 @@
+name: Build and Package Cesium for Unreal for Android
+
+on:
+  workflow_call:
+    inputs:
+      output-package-name:
+        required: true
+        type: string
+        default: 'CesiumUnreal-2.7.1'
+      relative-build-directory:
+        description: 'Directory where the github repo will be checked out to and then built'
+        type: string
+        required: true
+      relative-output-directory:
+        description: 'Directory to save the output file'
+        type: string
+        required: true
+      unreal-engine-version:
+        required: true
+        type: string
+      unreal-batch-files-relative-directory:
+        required: true
+        type: string
+      android-ndk-version:
+        required: true
+        type: string
+
+env:
+  NDKROOT: ${{ github.workspace }}/android-ndk-${{ inputs.android-ndk-version }}
+  
+jobs:
+  build:
+    timeout-minutes: 210
+    runs-on: [self-hosted, windows, x64]
+    steps:
+      - name: Install Ninja and 7zip
+        run: |
+          choco install -y ninja 7zip
+          
+      - name: Install Android NDK
+        run: |
+          Invoke-WebRequest -Uri https://dl.google.com/android/repository/android-ndk-${{ inputs.android-ndk-version }}-windows.zip -OutFile ${{ github.workspace }}\android-ndk-${{ inputs.android-ndk-version }}-windows.zip
+      
+          7z x android-ndk-${{ inputs.android-ndk-version }}-windows.zip -o${{ github.workspace }}
+          del android-ndk-${{ inputs.android-ndk-version }}-windows.zip
+
+      - name: Install nasm
+        uses: ilammy/setup-nasm@v1.5.1
+
+      - name: Build cesium-native
+        run: |
+          cd ${{ inputs.relative-build-directory }}/extern
+
+          $env:ANDROID_NDK_ROOT=$env:NDKROOT.replace('\', '/')
+
+          cmake -B build-android -S . -G Ninja -DCMAKE_TOOLCHAIN_FILE="unreal-android-toolchain.cmake" -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-android --config Release --target install -j16
+          
+      - name: Overwrite plugin engine version
+        run: |
+          ((Get-Content -path ${{ inputs.relative-build-directory }}/CesiumForUnreal.uplugin -Raw) -replace '"EngineVersion": ".*?"','"EngineVersion": "${{ inputs.unreal-engine-version }}"') | Set-Content -Path ${{ inputs.relative-build-directory }}/CesiumForUnreal.uplugin
+          
+      - name: Customize BuildConfiguration.xml
+        run: |
+          echo "User Profile: $env:USERPROFILE"
+    
+          if (-not (Test-Path -Path "$env:USERPROFILE\AppData\Roaming\Unreal Engine\UnrealBuildTool")) {
+            mkdir "$env:USERPROFILE\AppData\Roaming\Unreal Engine\UnrealBuildTool"
+          }
+    
+          $xmlContent = @'
+          <?xml version="1.0" encoding="utf-8" ?>
+          <Configuration xmlns="https://www.unrealengine.com/BuildConfiguration">
+            <BuildConfiguration>
+              <MaxParallelActions>8</MaxParallelActions>
+            </BuildConfiguration>
+            <SourceFileWorkingSet><Provider>None</Provider></SourceFileWorkingSet>
+          </Configuration>
+          '@
+    
+          Set-Content -Path "$env:USERPROFILE\AppData\Roaming\Unreal Engine\UnrealBuildTool\BuildConfiguration.xml" -Value $xmlContent
+            
+      - name: Package CesiumForUnreal plugin
+        run: |
+          ./${{ inputs.unreal-batch-files-relative-directory }}/RunUAT.bat BuildPlugin -Plugin="${{ github.workspace }}/${{ inputs.relative-build-directory }}/CesiumForUnreal.uplugin" -Package="${{ github.workspace }}/${{ inputs.relative-output-directory }}/cesium-android" -CreateSubFolder -TargetPlatforms=Android -NoHostPlatform
+          echo LastExitCode=$LASTEXITCODE
+          if ($LASTEXITCODE -eq 0) {
+            exit 0
+          }
+          else {
+            cat "C:\Users\runneradmin\AppData\Roaming\Unreal Engine\AutomationTool\Logs\C+Program+Files+Epic+Games+UE_5.3\UBT-UnrealGame-Android-Development.txt"
+            exit -1
+          }

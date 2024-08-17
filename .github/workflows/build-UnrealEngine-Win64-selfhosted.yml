@@ -1,0 +1,149 @@
+# This script is made to run on my own machine, which already has some dependencies (other than the ones listed in the build script) installed.
+# Here are the ones that I think *might* be pertinant if you're taking a look at this because you want to use it yourself, or modify it.
+#
+# Windows 10 Pro - 22H2 - 19045.4651
+# Visual Studio 2022 Community Edition
+#   - Desktop Development with C++
+#   - Game Development with C++
+# .Net Core 3.1 Runtime
+# .Net Framework 3.5
+# Git version 2.46.0.windows.1
+# gh version 2.54.0 (2024-08-01)
+# CMake 3.30.1
+# choco (Chocolatey) version 2.3.0
+#
+# I found it useful to run my self-hosted runner in an elevated powershell as a service (an option available during setup) because there's several requests for admin permissions, and the build can fail due to timing out if they aren't approved.
+# You can delete a service by running sc delete <Service name> (not display name) from an elevated CMD shell. You can find the service name by opening the "Services" program and opening the properties tab for the service.
+#
+# If you want to do this locally on your machine, without the build script, you might want to run the build portion like this:
+#   Note: Using the CMD version gives you control over number of CPUs (0xFF = 8 cores, 0xFFFF = 16 cores, etc..). The "normal" specifier in both commands dictates the priority of the process.
+#   CMD:         start /affinity 0xFFFF /normal C:\Users\user\Desktop\UnrealEngine-release\Engine\Build\BatchFiles\build.bat UnrealEditor Win64 Development -PlatformToolset=v143
+#   Powershell:  Start-Process -FilePath "C:\Users\user\Desktop\UnrealEngine-release\Engine\Build\BatchFiles\build.bat" -ArgumentList "UnrealEditor Win64 Development -PlatformToolset=v143" -Priority "Normal" -NoNewWindow -WindowStyle "Normal"
+#
+# Unreal Engine is a private repository.
+# In order to use this script, you need some sort of token that allows you to access it.
+# The way I did this was:
+# 1.) Got access (you can find out how to do this on Unreal Engine's website)
+# 2.) Forked the repo to my own account. The repo I have access to is private, so the fork is also private. You can't see it, but it's there.
+# 3.) Set up a private access token that has permission to checkout any repo in my personal account.
+#       My Profile > Settings > Developer settings (all the way at the bottom) > Personal access tokens > Personal access tokens (classic) > Generate new token 
+#       repo = true
+#       Generate token
+# 4.) Copied that token, and then created a secret for this project named "PAT_CHECKOUT_ANY_REPO" that contains the same string
+#       You can see that that is the token used during the 'Checkout the Repository' step
+#
+# Okay, here's the most frustrating part:
+# Long paths is clearly enabled. You see it, right? Under the 'Set up Git' step.
+# Well, it doesn't work.
+# So here's what you do:
+# 1.) Your runner directory isn't C:/actions-runner, it's C:/r, or something like that
+# 2.) Your working directory isn't called "_work" anymore, it's called "a."
+# 3.) This repo isn't called "MyCesiumForUnrealBuild," it's called "h."
+
+name: Build Unreal Engine for Windows
+
+on:
+  workflow_call:
+    inputs:
+      output-zip-file-name:
+        description: 'Name the output .tar file'
+        type: string
+        required: true
+        default: 'UE_5.4.3'
+      relative-build-directory:
+        description: 'Directory to use to checkout and build the package'
+        type: string
+        required: true
+      relative-output-directory:
+        description: 'Directory to save the output file'
+        type: string
+        required: true
+      repository:
+        description: 'GitHub repository (e.g., owner/repo)'
+        type: string
+        required: false
+        default: 'TimothyYohanan/UnrealEngine'
+      ref:
+        description: 'Git reference (branch, tag, SHA) to checkout'
+        type: string
+        required: false
+        default: 'release'
+      visual-studio-version:
+        required: false
+        type: string
+        default: '2022'
+      visual-studio-edition:
+        required: false
+        type: string
+        default: 'Preview'
+      visual-studio-components:
+        description: 'MSVC Component Paths, comma seperated, no spaces (Ref. https://learn.microsoft.com/en-us/visualstudio/install/workload-component-id-vs-build-tools?view=vs-2022)'
+        required: false
+        type: string
+        default: 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64'
+
+jobs:
+  build:
+    timeout-minutes: 210
+    runs-on: [self-hosted, windows, x64]
+
+    steps:
+      - name: Set up Git
+        run: |
+          git config --global core.longpaths true
+          git config --global core.autocrlf input
+
+      - name: Install Dependencies from Chocolatey
+        run: |
+          choco install -y 7zip
+          
+      - name: Install Visual Studio components
+        run: |
+          $components = "${{ inputs.visual-studio-components }}" -split "," | foreach {"--add $_"}
+          if ($components.Length -gt 0)
+          {
+            $componentcmd = $components -join " "
+            Start-Process "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vs_installer.exe" -ArgumentList "modify --installPath ""C:\Program Files\Microsoft Visual Studio\${{ inputs.visual-studio-version }}\${{ inputs.visual-studio-edition }}"" --quiet $componentcmd" -Wait -PassThru
+          }
+          
+      - name: Checkout the Repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.repository }}
+          ref: ${{ inputs.ref }}
+          token: ${{ secrets.PAT_CHECKOUT_ANY_REPO }}
+          path: '${{ github.workspace}}//${{ inputs.relative-build-directory }}'
+          
+      - name: Download and Install Unreal Engine Dependencies
+        run: |
+          .\${{ inputs.relative-build-directory }}\Setup.bat
+          
+      - name: Generate Unreal Engine Project Files
+        run: |
+          .\${{ inputs.relative-build-directory }}\GenerateProjectFiles.bat
+          
+      - name: Build Unreal Engine
+        run: |
+          .\${{ inputs.relative-build-directory }}\Engine\Build\BatchFiles\Build.bat UnrealEditor Win64 Development -waitmutex -PlatformToolset=v143
+
+      - name: Create the Output Directory if it Doesn't Exist
+        run: |
+          if (-not (Test-Path -Path '${{ github.workspace }}//${{ inputs.relative-output-directory }}')) {
+            mkdir '${{ github.workspace }}//${{ inputs.relative-output-directory }}'
+          }
+          
+      - name: Compress the Build Directory and Put it in the Output Folder
+        shell: cmd
+        run: |
+          set ArchiveFormat=7z
+          set CompressionLevel=5
+          set CompressionMethod=LZMA2
+          set Multithreading=on
+          set InputDirectory=${{ github.workspace }}\${{ inputs.relative-build-directory }}\*
+          set OutputPath=${{ github.workspace }}\${{ inputs.relative-output-directory }}\${{ inputs.output-zip-file-name }}.7z
+    
+          7z a -t%ArchiveFormat% -mx=%CompressionLevel% -m0=%CompressionMethod% -mmt=%Multithreading% "%OutputPath%" "%InputDirectory%"
+
+      - name: Delete the Checkout Directory (since it's ~200Gb)
+        run: |
+          Remove-Item -LiteralPath '${{ github.workspace}}//${{ inputs.relative-build-directory }}' -Recurse -Force

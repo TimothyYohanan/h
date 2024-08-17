@@ -1,0 +1,34 @@
+name: Modifies one build file in the Cesium for Unreal package so that sqlite3 uses standard syntax, which is useful for what I'm using it for.
+
+on: 
+  workflow_call:
+    inputs:
+      cesium-unreal-relative-checkout-directory:
+        description: 'Cesium for Unreal Checkout Path'
+        type: string
+        required: true
+
+env:
+  FILE_PATH: '${{ github.workspace }}\\${{ inputs.cesium-unreal-relative-checkout-directory }}\\extern\\CMakeLists.txt'
+  FIND_STRING: 'set(PRIVATE_CESIUM_SQLITE ON)'
+  REPLACE_STRING: 'set(PRIVATE_CESIUM_SQLITE OFF)'
+        
+jobs:
+  replace-string:
+    runs-on: [self-hosted, windows, x64]
+
+    steps:
+      - name: Replace string in file
+        run: |
+          if (Test-Path -Path $env:FILE_PATH) {
+            $content = Get-Content $env:FILE_PATH
+            if ($content -match [regex]::Escape($env:FIND_STRING)) {
+              $content -replace [regex]::Escape($env:FIND_STRING), $env:REPLACE_STRING | Set-Content $env:FILE_PATH
+            } else {
+              Write-Output "String not found: $findString"
+              exit 1
+            }
+          } else {
+            Write-Output "File not found: $filePath"
+            exit 1
+          }
