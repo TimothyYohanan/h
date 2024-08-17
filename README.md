@@ -1,4 +1,4 @@
-# h
+# My Custom Build of Cesium for Unreal
 This is a custom build of Cesium for Unreal that I'm using for an app that I'm working on.
 
 Anyone is welcome to use it for any purpose; I have no stipulations on it's usage other than those presented by Cesium.
